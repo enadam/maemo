@@ -1,0 +1,82 @@
+#!/bin/sh
+#
+# record -- record a video with gst-launch
+#
+# Synopsis:
+#   record [-n] [front] <output> [<nframes>] [<width> <height>]
+#
+# This program starts gst-launch with the appropriate gstreamer elements
+# to capture <nframes> many <width>x<height> frames possibly from the
+# front camera, and saves them in <output> in MP4 format.  With the -n
+# option you can just see the gst-launch invocation.
+#
+
+# Parse the command line.
+# -n?
+if [ "x$1" = "x-n" ];
+then
+	echo="echo";
+	shift;
+else
+	echo="";
+fi
+
+# front?
+if [ "$1" = "front" ];
+then
+	front="yes";
+	shift;
+else
+	front="no";
+fi
+
+# $fname, $nframes, $dims.
+if [ $# -lt 1 ];
+then
+	echo "usage: $0 [-n] [front] <output> [<nframes>] [<width> <height>]";
+	exit;
+fi
+
+fname="$1";
+shift;
+
+nframes="";
+if [ $# -eq 1 -o $# -ge 3 ];
+then
+	nframes="num-buffers=$1";
+	shift;
+fi
+
+dims="";
+if [ $# -ge 2 ];
+then
+	dims=",width=$1,height=$2";
+	shift; shift;
+fi
+
+# Figure out the element names.
+device="";
+if [ -d /sys/devices/platform/omap3isp/video4linux ];
+then	# Harmattan
+	[ "$front" = "yes" ] \
+		&& device="camera-device=secondary";
+	src="subdevsrc";
+	enc="dsphdmp4venc";
+	mux="mp4mux";
+else	# Fremantle
+	[ "$front" = "yes" ] \
+		&& device="device=/dev/video1";
+	src="v4l2camsrc";
+	enc="dspmp4venc";
+	mux="hantromp4mux";
+fi
+
+# Go.
+exec $echo gst-launch -eq \
+	   "$src" capture-mode=video $device $nframes \
+	\! "video/x-raw-yuv$dims" \
+	\! "$enc" mode=storage \
+	\! "$mux" \
+	\! filesink location="$fname";
+
+# End of record

@@ -1,0 +1,599 @@
+#!/bin/sh
+#
+# makehome -- make your gadget comfortable
+#
+# This script contains many routines that make a gadget more suitable
+# for development.  Provided that usbnet is set up it will:
+# -- make the wired network usable so you can browse the net from the gadget
+#    -- it enables IP forwarding and masquerading on the host
+#    -- set up correct proxies and nameservers on the gadget
+#    -- make sure that the settings stay across reboots
+# -- set up public key ssh authentication so you won't need to type rootme
+# -- make file system space on the device
+# -- create some reasonable .profile environment for /home/user
+# -- and add some useful utilities to /home/user/bin
+# -- make syslog user-readable and writeable
+# -- disable the crash reporter
+# -- disable rich cores
+# -- disable pmtrackerd
+# -- make the display full-bright all the time
+# -- removes the default apt repositories and adds maemo.research.nokia.com's
+# -- installs dummynet
+# -- enables the finger keyboard
+# -- disables the haptic feedback
+# -- disables the welcome video
+# -- disables annoying system sounds
+# -- removes the tutorial applet from the home screen
+# -- removes the usb dialog and the battery indicator
+# -- makes hildon-desktop.launch as privileged as hildon-desktop
+# -- sets up libartem for hildon-desktop
+# -- uploads everything in makehome.d to gadget:/root
+# -- adds visual startup finished notification
+# -- configure more legible colors and font size for xterm
+#
+# Usage:
+# -- boot the gadget and set up usbnet initially (`usboot' can be useful)
+# -- `ifup usb0' on the host
+# -- run `./makehome' on the host
+# -- be done until you reflash
+# -- run `./makehome' without argument just to upload the script
+#
+# Operation: makehome does the host setup first then copies and executes itself
+# on the gadget to finish the setup there.
+#
+# TODO
+# /sys/devices/platform/serial8250.0/sleep_timeout
+
+set -e;
+
+# DNS BEGIN
+encode()
+{
+	perl -0777 -p -e '$_ = unpack("H*", $_)';
+	echo;
+}
+
+gadget="gadget";
+case "$1" in
+gadget=*)
+	gadget="${1#gadget=}";
+	shift;
+	;;
+esac
+
+if ! grep -q "^Host $gadget\$" "$HOME/.ssh/config" 2> /dev/null;
+then
+	cat << EOT >> "$HOME/.ssh/config";
+
+Host $gadget
+	Hostname $gadget
+	User root
+	PubkeyAuthentication yes
+	PreferredAuthentications publickey,password
+	IdentityFile ~/.ssh/$gadget.key
+	StrictHostKeyChecking no
+	fi
+EOT
+fi
+
+if [ ! -f "$HOME/.ssh/$gadget.key" ];
+then
+	ssh-keygen -N '' -f "$HOME/.ssh/$gadget.key";
+	mv "$HOME/.ssh/$gadget.key.pub" "$HOME/.ssh/$gadget.pub";
+fi
+
+if [ `cat /proc/sys/net/ipv4/ip_forward` = "0" ];
+then
+	su -c '/sbin/iptables -t nat -A POSTROUTING -s gadget -j MASQUERADE \
+		&& echo 1 > /proc/sys/net/ipv4/ip_forward';
+fi
+
+[ "x$1" = "x-host" ] && exit;
+
+ssh-keygen -R "$gadget" -f ~/.ssh/known_hosts;
+if [ "x$1" = "x-n" ];
+then
+	setitup="";
+elif [ $# -eq 0 ];
+then
+	setitup="./setup";
+else
+	setitup="./setup $*";
+fi
+
+(
+	awk "/^# DNS BEGIN/{d=1} /^# DNS END/{d=0; next} !d{print}" $0;
+	echo "exit";
+
+	echo;
+	echo "BEGIN_resolv.conf";
+	cat "/etc/resolv.conf";
+	echo "END_resolv.conf";
+	echo;
+	echo "BEGIN_gadget.pub";
+	cat "$HOME/.ssh/$gadget.pub";
+	echo "END_gadget.pub";
+
+	if [ -L "$0" ];
+	then
+		dir=$(dirname $(readlink $0));
+	else
+		dir=$(dirname $0);
+	fi
+
+	payloads="";
+	for payload in $dir/makehome.d/*;
+	do
+		fname=`basename "$payload"`;
+		if [ -f "$payload" ];
+		then
+			echo;
+			echo "BEGIN_$fname";
+			encode < "$payload";
+			echo "END_$fname";
+		elif [ -L "$payload" ];
+		then
+			url=`readlink "$payload"`;
+
+			echo;
+			echo "BEGIN_$fname";
+			wget -q -O - "$url" | encode;
+			echo "END_$fname";
+		else
+			continue;
+		fi
+
+		payloads="$payloads $fname";
+	done
+
+	echo;
+	echo "PAYLOADS:";
+	echo "$payloads";
+) | ssh "$gadget" "cat > setup; chmod +x setup; $setitup";
+exit;
+# DNS END
+
+# Utils
+decode()
+{
+	perl -0777 -p -e '$_ = pack("H*", $_)';
+}
+
+extract()
+{
+	awk "/^BEGIN_$1/{d=1; next} /^END_$1/{exit} d{print}" $0;
+}
+
+copy()
+{
+	extract "$1" > "$2";
+}
+
+copybin()
+{
+	extract "$1" | decode > "$2";
+}
+
+# Setup
+#scripts="$scripts mkspace";
+#mkspace() {
+#	rm -rf /usr/share/nokia-maps;
+#}
+
+scripts="$scripts pubkey";
+pubkey() {
+	if [ ! -f /root/.ssh/authorized_keys ];
+	then
+		[ -d /root/.ssh ] || mkdir /root/.ssh;
+		copy gadget.pub /root/.ssh/authorized_keys;
+	fi
+}
+
+scripts="$scripts payload";
+payload() {
+	payloads=`tail -1 "$0"`;
+	for payload in $payloads;
+	do
+		rm -f "$payload";
+		copybin "$payload" "$payload";
+		if [ `dd if="$payload" bs=1 skip=1 count=3 2> /dev/null` = "ELF" ];
+		then
+			chmod +x "$payload";
+		fi
+	done
+}
+
+scripts="$scripts profile";
+profile() {
+	[ -f /root/.profile ] \
+		|| copy root_profile /root/.profile;
+	[ -d /home/user/tmp ] \
+		|| mkdir /home/user/tmp;
+	[ -e /root/tmp ] \
+		|| ln -s /home/user/tmp /root/tmp;
+
+	[ -f /home/user/.profile ] \
+		|| copy user_profile /home/user/.profile;
+	chown user.users /home/user/.profile;
+	for f in dkill play logtail;
+	do
+		if [ ! -f "/home/user/bin/$f" ];
+		then
+			[ -d /home/user/bin ] || mkdir /home/user/bin;
+			chown user.users /home/user/bin;
+			copy "$f" "/home/user/bin/$f";
+			chown user.users "/home/user/bin/$f";
+			chmod +x "/home/user/bin/$f";
+		fi
+	done
+}
+
+scripts="$scripts rwfiles";
+rwfiles() {
+	chmod 666 /var/log/syslog /usr/share/hildon-desktop/transitions.ini;
+}
+
+scripts="$scripts nocrap";
+nocrap() {
+	rm -f /etc/event.d/crash-reporter /etc/event.d/rich-core \
+		/etc/event.d/rich_core_dumps /etc/event.d/rich_core_pattern;
+}
+
+scripts="$scripts cores";
+install_cores="stopped rcS-late";
+cores() {
+	if [ ! -d /home/user/core-dumps ];
+	then
+		mkdir /home/user/core-dumps;
+		chown root /home/user/core-dumps;
+		chmod  777 /home/user/core-dumps;
+	fi
+	echo '/home/user/core-dumps/%e.core' \
+		> /proc/sys/kernel/core_pattern;
+}
+
+scripts="$scripts untrackpm";
+untrackpm() {
+	if [ -f /etc/event.d/pmtrackerdaemon ];
+	then
+		stop pmtrackerdaemon;
+		rm -f /etc/event.d/pmtrackerdaemon;
+	fi
+}
+
+# 0 - no inhibit
+# 1 - inhibit dim with charger
+# 2 - inhibit blank with charger (display still dims)
+# 3 - inhibit dim (always)
+# 4 - inhibit blank (always; display still dims)
+scripts="$scripts undim";
+install_undim="started xomap";
+undim() {
+	gconftool-2 -s /system/osso/dsm/display/display_brightness    -t int --   5;
+	gconftool-2 -s /system/osso/dsm/display/display_dim_timeout   -t int -- 120;
+	gconftool-2 -s /system/osso/dsm/display/display_blank_timeout -t int --  -1;
+	gconftool-2 -s /system/osso/dsm/display/inhibit_blank_mode    -t int --   4;
+	echo 255 > /sys/class/backlight/acx565akm/brightness;
+}
+
+scripts="$scripts resolv_conf";
+resolv_conf() {
+	copy resolv.conf /etc/resolv.conf.usb0;
+	if ! grep -q resolv.conf.usb0 /etc/dnsmasq.conf;
+	then
+		echo "resolv-file=/etc/resolv.conf.usb0" >> /etc/dnsmasq.conf;
+	fi
+	if [ -f /var/run/dnsmasq.pid ];
+	then
+		kill `cat /var/run/dnsmasq.pid` || true;
+	fi
+}
+
+scripts="$scripts mknet";
+install_mknet="started xomap";
+mknet() {
+	rmmod g_file_storage || true;
+	modprobe g_nokia;
+	ifup usb0 || true;
+	cp /etc/resolv.conf.usb0 /var/run;
+}
+
+scripts="$scripts proxies";
+proxies() {
+	pfx="/system/osso/connectivity/IAP/DUMMY";
+	gconftool-2 -s "$pfx/proxytype"		-t string MANUAL;
+	gconftool-2 -s "$pfx/proxy_http"	-t string nokes.nokia.com;
+	gconftool-2 -s "$pfx/proxy_http_port"	-t int 8080;
+	gconftool-2 -s "$pfx/proxy_https"	-t string nokes.nokia.com;
+	gconftool-2 -s "$pfx/proxy_https_port"	-t int 8080;
+
+	pfx="/system/http_proxy";
+	gconftool-2 -s "$pfx/host"		-t string nokes.nokia.com;
+	gconftool-2 -s "$pfx/port"		-t int 8080;
+	gconftool-2 -s "$pfx/use_http_proxy"	-t bool TRUE;
+
+	pfx="/system/proxy";
+	gconftool-2 -s "$pfx/secure_host"	-t string nokes.nokia.com;
+	gconftool-2 -s "$pfx/secure_port"	-t int 8080;
+	gconftool-2 -s "$pfx/mode"		-t string manual;
+}
+
+scripts="$scripts dummynet";
+dummynet() {
+	if [ ! -f /etc/gconf/schemas/libicd-network-dummy.schemas ];
+	then
+		pfx="/system/osso/connectivity/IAP/DUMMY";
+		[ -f dummynet.deb ] || copybin dummynet.deb dummynet.deb;
+		dpkg -i dummynet.deb;
+		gconftool-2 -s "$pfx/type"	-t string DUMMY;
+		gconftool-2 -s "$pfx/name"	-t string 'Timmy Network';
+		gconftool-2 -s "$pfx/autoconnect" -t boolean TRUE;
+		stop icd2;
+		start icd2;
+		rm dummynet.deb;
+	fi
+}
+
+scripts="$scripts apt";
+apt() {
+	copy apt.conf /etc/apt/apt.conf.d/20-mrnc;
+	rm -f /etc/apt/sources.list.d/hildon-application-manager.list;
+	copy sources.list /etc/apt/sources.list.d/mrnc.list;
+	[ -d /var/log/apt ] \
+		|| mkdir /var/log/apt;
+}
+
+scripts="$scripts fkb";
+fkb() {
+	gconftool-2 -s /apps/osso/inputmethod/use_finger_kb -t bool true;
+}
+
+scripts="$scripts novibra";
+novibra() {
+	gconftool-2 -s /apps/osso/applet/osso-applet-display/vibra_on \
+		-t bool false;
+	gconftool-2 -s /system/osso/dsm/vibra/touchscreen_vibra_enabled \
+		-t bool false;
+}
+
+scripts="$scripts nohands";
+nohands() {
+	rm -f	/etc/X11/Xsession.d/10hildon_welcome \
+		/etc/X11/Xsession.d/30osso_startup_wizard;
+}
+
+scripts="$scripts nonoise";
+nonoise() {
+	rm -f	/home/user/.local/share/sounds/NokiaTune.aac.decoded \
+		/home/user/.local/share/sounds/NokiaTune.aac.wav \
+		/home/user/.local/share/sounds/ui-clock_alarm_default.aac.wav \
+		/usr/share/sounds/NokiaTune.aac			\
+		/usr/share/sounds/ui-wake_up_tune.wav		\
+		/usr/share/sounds/ui-clock_alarm_default.aac	\
+		/usr/share/sounds/ui-clock_alarm_2.aac		\
+		/usr/share/sounds/ui-clock_alarm_3.aac		\
+		/usr/share/sounds/ui-clock_alarm_4.aac;
+}
+
+scripts="$scripts notutor";
+notutor() {
+	[ -d /home/user/.config/hildon-desktop ] \
+		&& echo -n > /home/user/.config/hildon-desktop/home.plugins;
+	sed -e '/tutorial/{d}' \
+		< /etc/hildon-desktop/home.plugins \
+		> /etc/hildon-desktop/home.plugins.new;
+	cat /etc/hildon-desktop/home.plugins.new \
+		> /etc/hildon-desktop/home.plugins;
+	rm /etc/hildon-desktop/home.plugins.new;
+}
+
+scripts="$scripts hsm";
+hsm() {
+	path="/usr/share/applications/hildon-status-menu";
+	file="$path/hildon-status-menu-usb.desktop";
+	if [ -f "$file" ];
+	then
+		mv "$file" "$file.sav";
+	fi
+	file="$path/status-area-applet-battery.desktop";
+	if [ -f "$file" ];
+	then
+		mv "$file" "$file.sav";
+	fi
+}
+
+scripts="$scripts xterm";
+xterm() {
+	gconftool-2 -s /apps/osso/xterm/background -t string '#000000';
+	gconftool-2 -s /apps/osso/xterm/foreground -t string '#cccccc';
+	gconftool-2 -s /apps/osso/xterm/font_size  -t int    24;
+}
+
+scripts="$scripts ohm";
+ohm() {
+	file="/usr/share/policy/etc/current/syspart.conf";
+	if ! grep -q hildon-desktop.launch "$file";
+	then
+		sed -ie '/^\[classify desktop\]$/{p; i "/usr/bin/hildon-desktop.launch"
+d}' "$file";
+	fi
+}
+
+scripts="$scripts artemize";
+artemize() {
+	[ -d /etc/artem ] || mkdir /etc/artem;
+	[ -d /etc/artem/hildon-desktop ] \
+		|| mkdir /etc/artem/hildon-desktop;
+	[ -L /etc/artem/hildon-desktop/output ] \
+		|| ln -s /var/tmp/ide /etc/artem/hildon-desktop/output;
+	[ -L /etc/artem/hildon-desktop/daemon ] \
+		|| ln -s . /etc/artem/hildon-desktop/daemon;
+	chown -hR user.users /etc/artem;
+
+	if ! grep -q /root/libartem.so /etc/ld.so.preload 2> /dev/null;
+	then
+		echo /root/libartem.so >> /etc/ld.so.preload;
+	fi
+}
+
+scripts="$scripts rtg"
+rtg() {
+	if [ ! -f /etc/X11/Xsession.post/05ready_to_go ];
+	then
+		copy ready_to_go /etc/X11/Xsession.post/05ready_to_go;
+		chmod 755 /etc/X11/Xsession.post/05ready_to_go;
+	fi
+}
+
+if [ "x$1" = "x-n" ];
+then
+	opt_noinst="yes";
+	shift;
+else
+	opt_noinst="no";
+fi
+
+if [ $# -eq 0 ];
+then
+	set -- $scripts;
+elif [ $# -eq 1 -a "$1" = "mini" ];
+then
+	set -- pubkey resolv_conf mknet dummynet proxies
+fi
+
+for script;
+do
+	echo "Running $script...";
+	$script;
+
+	[ "$opt_noinst" = "no" ] \
+		|| continue;
+	eval [ "\"\$install_$script\"" ] \
+		|| continue;
+	[ ! -f "/etc/event.d/$script" ] \
+		|| continue;
+
+	echo "Installing $script...";
+	(
+		eval echo "start on \$install_$script";
+		echo "console output";
+		echo "script";
+		awk "/^$script\(\) *\\{/{d=1; next} d{if(/^\}$/)exit; print}" $0;
+		echo "end script";
+	) > "/etc/event.d/$script";
+done
+
+sync;
+exit;
+
+# Data
+BEGIN_root_profile
+alias l='ls -al';
+alias lx='ls -C';
+END_root_profile
+
+BEGIN_user_profile
+HISTFILE="$HISTFILE.$$";
+PATH="/home/user/bin:/root:$PATH";
+alias l='ls -al';
+alias lx='ls -C';
+END_user_profile
+
+BEGIN_dkill
+#!/bin/sh
+
+[ $# -gt 0 ] || set -- hildon-desktop;
+exec /usr/sbin/dsmetool -k "/usr/bin/$1";
+END_dkill
+
+BEGIN_play
+#!/bin/sh
+
+uri=`realpath "$1"`;
+exec gst-launch playbin2 uri="file://$uri";
+END_play
+
+BEGIN_logtail
+#!/bin/sh
+
+tail -0 -f "$1" &
+pid=$?
+trap "kill $pid; exit" INT;
+while read line;
+do
+	echo "============================================================";
+	echo break >&2;
+done
+
+kill $pid;
+END_logtail
+
+BEGIN_apt.conf
+APT::Get::AllowUnauthenticated 1;
+Acquire::http::proxy "http://nokes.nokia.com:8080";
+END_apt.conf
+
+BEGIN_sources.list
+deb http://maemo.research.nokia.com/repository/fremantle default/pre-released modified nokia-open nokia-closed ossw
+END_sources.list
+
+BEGIN_ready_to_go
+#!/bin/sh
+#
+# /etc/X11/Xsession.post/05ready_to_go -- notify me when the desktop is usable
+#
+
+if [ -n "$SESSIONFILE" ];
+then
+	# We're being sourced by /etc/X11/Xsession, let's go
+	# into the background.
+	$SESSIONFILE &
+else
+	# Wait until the CPU is >=60% idle on average over three seconds.
+	top -d 1 -b | python -c "
+#!/usr/bin/python2.5
+
+import sys, re
+import gobject, gtk, pygtk, pango
+
+win = gtk.Window()
+label = gtk.Label('...')
+label.modify_font(pango.FontDescription('200'));
+win.add(label)
+
+win.realize()
+win.window.property_change('_NET_WM_WINDOW_TYPE',
+	'ATOM', 32, gtk.gdk.PROP_MODE_REPLACE,
+	[gtk.gdk.atom_intern('_NET_WM_WINDOW_TYPE_NOTIFICATION')])
+win.window.property_change('_HILDON_NOTIFICATION_TYPE',
+	'STRING', 8, gtk.gdk.PROP_MODE_REPLACE,
+	'_HILDON_NOTIFICATION_TYPE_BANNER')
+win.show_all()
+
+idles = []
+re =  re.compile(' (\d+)(\.\d+)?% idle ')
+def fun(a, b):
+        m = re.search(sys.stdin.readline())
+        if m != None:
+		idle = m.group(1)
+		idles.append(int(idle))
+		if len(idles) > 3:
+			del idles[0]
+			if sum(idles) / len(idles) > 60:
+				label.set_text('Go!')
+				win.add_events(gtk.gdk.BUTTON_PRESS_MASK)
+				win.connect('button-press-event',
+					lambda a, b: sys.exit(0))
+				return False;
+                label.set_text(idle+'%')
+        return True
+gobject.io_add_watch(sys.stdin, gobject.IO_IN, fun)
+
+gtk.main()
+"
+fi
+
+# End of 05ready_to_go
+END_ready_to_go
+
+# End of makehome

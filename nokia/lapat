@@ -1,0 +1,296 @@
+#!/bin/sh -e
+#
+# lapat -- automate the tagging and release of projects
+#
+# Usage:
+#   lapat   [<project>]...
+# Release <project>s or all the $projects we know about.
+#   lapat -x <project>...
+# Print undo instructions.
+#
+# Check out what's new in a projects's $master branch, and if it finds it
+# release-worthy, then
+# -- creates the release branch (so you can patch it manually)
+# -- updates the debian/changelog
+# -- tags, publishes the result and sends an email
+# -- merges the release with the $master branch and starts a new release
+#
+# Optional custom hook functions can be executed after repository preparation
+# and publication.
+#
+
+# Configuration
+fixes_only="no";	# only release if there have been Fixes:
+master="staging";	# which branch to release
+mailto="natalia.dobrovolskaya@nokia.com";
+ccmail="urho.konttori@nokia.com,jorgen.scheibengruber@nokia.com,Mihaly.Milian@nokia.com,ext-sergiusz.szachowalow@nokia.com,tobias.koch@nokia.com,kimmo.hamalainen@nokia.com";
+
+# Projects (repositories) to release
+projects="mc sw";
+mc_repo="mcompositor";
+mc_url="ssh://git@gitorious.org/meegotouch/meegotouch-compositor.git";
+sw_repo="swipe";
+sw_url="ssh://git@dvcs.projects.maemo.org/mcompositor-plugins/seattle";
+
+# Globals
+me="${0#*/}";
+author="$me <$me>";
+chlog="debian/changelog";
+
+# Hooks
+# Update the plugin's dependency on mc-dev.
+prepare_sw()
+{
+	if [ "$mc_newver" != "" ];
+	then
+		sed -e "s/mcompositor-dev (>= *[^)]*)/mcompositor-dev (>= $mc_newver)/" -i debian/control;
+	fi
+}
+
+# Push changes to the fixer repository.
+release_mc()
+{
+	git push -f fixer;
+}
+
+release_sw()
+{
+	release_mc;
+}
+
+# Execute a hook.
+hook()
+{
+	which="$1";
+
+	if type "${which}_${project}" > /dev/null 2>&1;
+	then
+		${which}_$project;
+	fi
+}
+
+# Branch and tag a repository
+prepare()
+{
+	project="$1";
+
+	eval repo=\"\$${project}_repo\";
+	cd "$repo";
+
+	git reset -q --hard
+	git checkout -q "$master";
+	[ "$revert" = "yes" ] || git pull -q;
+
+	# Get the upcoming version number ($ver) and the current tag ($oldtag).
+	set -- `grep '^[^ ]\+' "$chlog" | head -2 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+-[0-9]\+'`;
+	tag="$1";
+	ver="${tag%-*}";
+	oldtag="$2";
+	old="${oldtag%-*}";
+
+	# Consider changes since $base, the point where the repo was
+	# tagged previously.  The new release will be in $branch.
+	branch="for_$ver";
+	base=`git merge-base HEAD "$oldtag"`;
+
+	# Give instructions how to revert the latest tag?
+	if [ "$revert" = "yes" ];
+	then
+		echo git reset --hard "$base~1";
+		echo git branch -D "for_$old";
+		echo git tag -d "$oldtag";
+		echo rm -f ".git/refs/remotes/origin/for_$old";
+		cd ..;
+		return 1;
+	fi
+
+	# Name of the source package to be used in the notification e-mail,
+	# and the address of the maintainer.
+	package=`sed -ne 's/^Source: //p' debian/control`;
+	maint=`sed -ne 's/^Maintainer: //p' debian/control`;
+
+	# Is there new stuff to tag?
+	changes="no";
+	git log "HEAD...$base" > changes;
+	sed -ne '/^    Fixes: NB#[0-9]\+/!d; s/^ */  * /p' changes > fixes;
+	if [ -s fixes ];
+	then
+		changes="yes";
+	elif [ "$fixes_only" = "no" ] \
+		&& grep '^Author: ' changes | grep -q -v "$author";
+	then
+		changes="yes";
+	fi
+
+	if [ "$changes" = "no" ];
+	then
+		rm changes fixes;
+		cd ..;
+		echo "$me: $project: no changes" >&2;
+		return 1;
+	fi
+
+	# Create the release branch and write the changelog.
+	git checkout -q -b "$branch";
+	(
+		# Header: "package (version) ..."
+		sed -ne "s/([^)]*)/($tag)/p;q" "$chlog";
+		echo;
+
+		# Copy manullay added changes.
+		sed -ne "/^  \\* \.\$/d; /^  \\* /p; /($oldtag)/q" "$chlog";
+
+		# Add the fixes.
+		if [ -s fixes ];
+		then
+			cat fixes;
+		else
+			echo "  * nothing special";
+		fi
+		echo;
+
+		# Footer: "  -- <maintainer>  <date>"
+		echo " -- $maint " `date --rfc-822`;
+		echo;
+
+		# Copy earlier changelog entries.
+		sed -ne "/($oldtag)/,//p" "$chlog";
+	) > "$chlog.new";
+	mv -f "$chlog.new" "$chlog";
+	rm changes fixes;
+
+	# Tag the branch.
+	git commit -q --author="$author" -a -m "branch $ver";
+	git tag "$tag";
+
+	# Commit the changes to the master branch as well.
+	git checkout -q "$master";
+	git merge "$branch";
+
+	# Do $project-specific preparation to the master branch.
+	hook prepare;
+
+	# Add a dummy changelog entry for the new upcoming version.
+	newver=$((`echo "$ver" | tr -d . | sed -e 's/^0*//'` + 1));
+	newver=`echo "$newver" | sed -e 's/^\(.\)$/0\1/; s/^\(..\)$/0\1/; s/\([0-9]\)\([0-9]\)$/.\1.\2/'`;
+
+	(
+		sed -ne "s/([^)]*)/($newver-1~unreleased)/p;q" "$chlog";
+		echo;
+		echo "  * .";
+		echo;
+		echo " -- $maint " `date --rfc-822`;
+		echo;
+		cat "$chlog";
+	) > "$chlog.new";
+	mv -f "$chlog.new" "$chlog";
+	git commit -q --author="$author" -a -m "start $newver";
+
+	# Export the variables we've figured out.
+	for var in package ver tag old oldtag newver branch;
+	do
+		eval ${project}_$var=\"\$$var\";
+	done
+
+	# Done
+	cd ..;
+	return 0;
+}
+
+# Push what we've prepare()d.
+release()
+{
+	project="$1";
+
+	eval repo=\"\$${project}_repo\";
+	eval branch=\"\$${project}_branch\";
+
+	cd "$repo";
+	git pull -q;
+	git push --tags origin "$master" "$branch:$branch";
+	hook release;
+	cd ..;
+}
+
+# Main starts here
+# Revert latest tag?
+revert="no";
+if [ "x$1" = "x-x" ];
+then
+	revert="yes";
+	shift;
+fi
+
+# Release all $projects by default.
+if [ $# -eq 0 ];
+then
+	set -- $projects;
+fi
+
+# Go to where the repos are.
+dir="${0%/*}";
+if [ "$dir" != "$0" ];
+then
+	cd "$dir";
+fi
+
+# See what can be actually released of them.
+release="";
+for p;
+do
+	if prepare "$p";
+	then
+		release="$release $p";
+	fi
+done
+
+if [ "$release" = "" ];
+then
+	echo "$me: nothing to release" >&2;
+	exit 1;
+fi
+
+# Push and collect what giturls to send in the mail notification.
+# Tell what has been released in the $subject.
+subject="";
+for project in $release;
+do
+	release "$project";
+	eval giturls=\"\$giturls \$${project}_url\#\$${project}_tag\";
+	eval pkgtag=\"\$${project}_package \$${project}_tag\";
+	if [ "$subject" = "" ];
+	then
+		subject="$pkgtag";
+	else
+		subject="$subject, $pkgtag";
+	fi
+done
+
+# Send the mail mentioning the giturls and the changes.
+# Be the last maintainer we encountered the unlucky one who gets the Reply-To.
+(
+	echo "This tag was created without human intervention.";
+	echo;
+
+	for url in $giturls;
+	do
+		echo "giturl $url";
+	done
+	echo;
+
+	echo "Changes:";
+	echo;
+	for p in $release;
+	do
+		eval cd \"\$${p}_repo\";
+		eval tag=\"\$${p}_tag\";
+		git-cat-file blob `git-ls-tree "$tag" debian/changelog | awk '{print $3}'` | sed -ne '/^ --/q;p';
+		cd ..;
+	done
+	echo "-- ";
+) | REPLYTO="$maint" mail -s "$subject" -c "$ccmail" "$mailto";
+
+# Finito
+exit 0;
+
+# End of lapat

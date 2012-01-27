@@ -1,0 +1,51 @@
+#!/bin/sh
+#
+# mkrootfs -- create a flashable ubifs image from a directory tree
+#
+# Having extracted and customized a rootfs.tar.gz, build an image
+# that you can actually use on your gadget.
+#
+# Synopsis:
+#   mkrootfs [[<fs-root>] [<output-image>]]
+#
+# You can flash <output-image> with ``flasher -R <output-image> -f''.
+#
+
+# We need to be root to be able to read everything in $fsroot.
+[ $UID -eq 0 ] || exec su -c "$0 $*";
+
+# Parse the command line.
+fsroot="rootfs";
+rootfs="rootfs.ubifs";
+if [ $# -gt 0 ];
+then
+	fsroot="$1";
+	shift;
+	if [ $# -gt 0 ];
+	then
+		rootfs="$1";
+		shift;
+	fi
+fi
+
+# Add tools to $PATH.
+PATH="$PATH:/scratchbox/devkits/mtd/bin";
+set -e;
+
+# Image creation is a two-pass process and unfortunately it cannot be
+# pipelined.
+mkfs.ubifs -r "$fsroot" -o "$rootfs.tmp" -m 2048 -e 129024 -c 2047 -R 4MiB;
+cat << EOT | ubinize -o "$rootfs" -m 2048 -p 128KiB -s 512 /dev/stdin;
+[ubifs]
+mode="ubi"
+image="rootfs.ubifs.tmp"
+vol_id="0"
+vol_size="230MiB"
+vol_type="dynamic"
+vol_name="rootfs"
+vol_alignment="1"
+vol_flags="autoresize"
+EOT
+rm "$rootfs.tmp";
+
+# End of mkrootfs

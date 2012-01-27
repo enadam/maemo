@@ -1,0 +1,4 @@
+repogen.pl	generate shortcut links to the mrnc repositories
+fbi.py		reach the Internet through WANO easily
+pia		APT method which asks your password interactively
+lapat		tag and publish a release

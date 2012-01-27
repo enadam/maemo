@@ -1,0 +1,16 @@
+diff --git a/mkspecs/common.pri b/mkspecs/common.pri
+index 160ba89..551cd18 100644
+--- a/mkspecs/common.pri
++++ b/mkspecs/common.pri
+@@ -95,6 +95,11 @@ include($${M_BUILD_TREE}/mkspecs/features/meegotouch_defines.prf)
+ }
+ 
+ unix {
++   DEVKIT_LIBDIR = /scratchbox/devkits/qt/lib
++   QMAKE_LFLAGS += -ldl
++   QMAKE_LFLAGS += -Wl,-rpath -Wl,$$DEVKIT_LIBDIR
++   QMAKE_LFLAGS += -Wl,--dynamic-linker -Wl,$$DEVKIT_LIBDIR/ld-linux.so.2
++
+    # drop unneeded dependencies
+    !macx {
+       QMAKE_LFLAGS += "-Wl,--as-needed"

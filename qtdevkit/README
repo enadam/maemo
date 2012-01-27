@@ -1,0 +1,5 @@
+qt-devkit.tar.gz	the devkit as an extractable tarball
+qt.patch		patch for Qt to build native optimized tools with -rpath
+pkg-config.patch	patch for pkg-config to build with -rpath
+libmeegotouch.patch	patch for libmeegotouch to build tools with -rpath
+qemustat.pl		create statistics of cputransp.log created by qemu

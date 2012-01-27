@@ -1,0 +1,16 @@
+gadged.c		bring up usb0 when the gadget appears on the bus
+gadpkg			transfer to and install packages on the device with a single command
+usboot			flash and first-boot a device conveniently
+makehome.fremantle	make your fremantle device comfortable for development
+makehome.harmattan	make your harmattan device comfortable for development
+rot			falsify the accelerometer readings
+record			record a video with gst-launch
+scp			say goodbye to "Text file busy" when scp:ing binaries
+roadrunner.c		simple always accessible Run dialog for Fremantle
+pls.py			execute a program with VideoPlayback permission on Harmattan
+vkb.py			open the virtual keyboard on Harmattan
+debacle.c		extract and decode selected subimages of a FIASCO
+xprootfs		extract a rootfs.tar.gz to be buildable later
+mkrootfs		create a flashable ubifs image from a directory tree
+flipstats.conf		make the X server log rendering statistics
+toys/			little toy programs for N900

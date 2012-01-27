@@ -1,0 +1,210 @@
+#!/bin/sh -e
+#
+# scp -- proxy scp program to remove files before overwriting
+#
+# When this proxy is installed all files copied to this host via a remote
+# invocation of scp(1) will be placed in a temporary file first then renamed,
+# effectively replacing the target files.  This is handy if the target files
+# are not directly writable, such as currently executing executables.
+# You can also automatically change the ownership of the copied files.
+#
+# To install it simply copy it to a directory in your $PATH on the
+# target machine such as /usr/local/bin and you're done.
+#
+
+# Configuration
+# $scp:		the path to the real scp program
+# $user:	whom to give the copied files' ownership automatically,
+#		or empty string to not change file ownership
+# $replacing:	what to shout when we replace a file,
+#		or empty string to stay quiet
+# $bs:		copy file contents in this large chunks
+scp="/usr/bin/scp";
+user="user.users";
+replacing="\033[1mREPLACING\033[22m";
+bs=4096;
+
+# Only activate if we're invoked remotely and we receive files.
+target="";
+real_target="";
+if eval [ \$# -ge 2 -a \"x\$$(($#-1))\" = "x-t" ]; #"]
+then	# The last two arguments are -t <target>.
+	eval target=\"\$$#\";
+
+	# Adjust $target such that it will be the temporary file,
+	# because it overrides the $fname we'll pass to $scp.
+	if [ -f "$target" -a ! -d "$target" ];
+	then
+                # Have the tempfile in the same directory as $target.
+		real_target="$target";
+		target=`TMPDIR=. mktemp "$target.XXXXXX"`;
+		rm "$target"; # We just wanted a tempname.
+
+		target="${target#./}";
+		tmp_target="${target#$real_target}";
+		set -- "$@""$tmp_target";
+	fi
+else	# Otherwise stay out of the way.
+	exec "$scp" "$@";
+fi
+
+# We'll communicate with $scp through $fifo.
+fifo=`mktemp /tmp/scp.XXXXXX`;
+rm "$fifo";
+mkfifo "$fifo";
+"$scp" "$@" < "$fifo" &
+
+# For debugging
+#set -x
+#exec 2>/tmp/log
+
+# Read file metainformation until we run out of them.
+# Use $* as a directory stack, for cases when we copy
+# an entire hierarchy.
+set --;
+overwrite="";
+while :;
+do
+	# We'll have one last thing to do before we quit.
+	if ! read mode size fname rest;
+	then
+		break="yes";
+	else
+		break="no";
+	fi
+
+	# Give $overwrite from the previous pass to $user if desired.
+	# It has to be postponed until we got feedback from the remote
+	# scp because $scp may not have created the file yet.  Perhaps
+	# it's still racy.
+	if [ "$overwrite" != "" ];
+	then
+		if [ "$user" != "" ];
+		then	# On FAT we get operation not permitted.
+			chown "$user" "$overwrite" || true;
+		fi
+
+		if [ "$replace" != "" ];
+		then	# Do actually replace.
+			mv -f "$overwrite" "$replace";
+		fi
+	fi
+
+	[ "$break" = "yes" ] && break;
+
+	# Is it a plain file?
+	overwrite="";
+	case "$mode" in
+	C*)
+		# Figure out the destination file name.
+		if [ -d "$target" ];
+		then
+			overwrite="$target/$fname";
+		else
+			overwrite="$target";
+		fi;
+		;;
+	D*)
+		# We'll copy a directory hierarchy until we receive 'E'.
+		if [ "$real_target" != "" ];
+		then	# Attempt to overwrite an existing file
+			# with a directory.
+			echo "$real_target already exists" >&2;
+			exit 1;
+		fi
+		set -- "$target" "$@";
+		target="$target/$fname";
+		;;
+	E)
+		target="$1";
+		shift;
+		echo "$mode";
+		continue;
+		;;
+	[]*)
+		echo "$mode" "$size" "$fname" $rest;
+		continue;
+		;;
+	esac
+
+	# Replace $overwrite if we should.
+	replace="";
+	if [ "$overwrite" = "" ];
+	then
+		:; # NOP
+	elif [ -d "$overwrite" ];
+	then	# $scp will fail anyway, let's not mess with it.
+		overwrite="";
+	elif [ "$real_target" != "" -o -f "$overwrite" -o -L "$overwrite" ];
+	then
+		if [ "$real_target" != "" ];
+		then	# $overwrite == $target
+			replace="$real_target";
+		else
+			replace="$overwrite";
+		fi
+
+		# Make sure we won't remove the symlink but its destination,
+		# except if it happens to be maemo-invoker, which we don't
+		# want to overwriter.
+		if [ -L "$replace" -a ! "$replace" -ef /usr/bin/maemo-launcher ];
+		then
+			# If $replace is a symlink its target must exist,
+			# otherwise realpath fails.
+			[ -f "$replace" ] || touch "$replace";
+			replace=`realpath "$replace"`;
+		fi
+
+		if [ "$real_target" != "" ];
+		then
+			# $fname is actually ignored by $scp, but
+			# be nice and add the temporary extension.
+			fname="$fname$tmp_target";
+		else
+			# Write to a temporary file first, then rename.
+			# Let $scp create the temporary file, so it will
+			# have correct permissions.
+			overwrite=`mktemp "$overwrite.XXXXXX"`;
+			fname=`basename "$overwrite"`;
+			rm "$overwrite";
+		fi
+	fi
+
+	# Announce
+	if [ "$replace" != "" -a "$replacing" != "" ];
+	then
+		echo -e "$replacing $replace" >&2;
+	fi
+
+	# Send the file metainformation.
+	echo "$mode" "$size" "$fname" $rest;
+
+	case "$mode" in
+	D*)
+		# For chown.
+		overwrite="$target";
+		;;
+	*)
+		# Copy the file contents.
+		n=$((size / bs));
+		[ $n -gt 0 ] \
+			&& dd bs=$bs count=$n 2> /dev/null;
+
+		n=$((size % bs));
+		[ $n -gt 0 ] \
+			&& dd bs=$n count=1 2> /dev/null;
+
+		# Forward the status code of the server.
+		# Unfortunately we can't know the status of $scp,
+		# but if it has some serious problem it will exit,
+		# and the pipe will be broken.
+		dd bs=1 count=1 2> /dev/null;
+		;;
+	esac
+done > "$fifo";
+
+# Clean up.
+rm "$fifo";
+wait;
+
+# End of scp

@@ -1,0 +1,287 @@
+#!/bin/sh
+#
+# usboot -- boot the gadget with usb0 up and security down
+#
+# This script uses flasher and performs kernel command line magic
+# to boot the gadget so that you can use usbnet out of the box.
+#
+# Usage: ./usboot [-noboot] [{<FIASCO> [<tarball>|init]}|<UBIFS>]
+#
+
+# We must be root to run flasher.
+if [ $EUID -ne 0 ];
+then
+	su -c "$0 $*";
+	code=$?;
+	[ $code -eq 23 ] || exit $code;
+
+	# Reflashing changes the gadget's ssh identify, remove it.
+	set -e;
+	for d in "$HOME" "/scratchbox/users/$USER/home/$USER";
+	do
+		f="$d/.ssh/known_hosts";
+		if [ -f "$f" ];
+		then
+			for g in gadget 192.168.2.15;
+			do
+				ssh-keygen -R "$g" -f "$f";
+			done
+		fi
+	done
+	exit 0;
+fi
+
+gadget="gagyi";
+if [ "x$1" = "-noboot" ];
+then
+	shift;
+	boot="no";
+	flashit()
+	{
+		shift;
+		flasher --flash "$@";
+	}
+
+	# Due to sh's quirky syntax we can't define it on a single line.
+	bootit()
+	{
+		:;
+	}
+else
+	boot="yes";
+	flashit()
+	{
+		flasher --flash "$@";
+	}
+
+	# This is only used if $gadget != rover.
+	bootit()
+	{
+		if [ -n "$maxcmdline" -a `echo "$cmdline" | wc -c` -gt $maxcmdline ];
+		then
+			echo "Kernel command line too long." >&2;
+			exit 1;
+		fi
+
+		sleep 3;
+		flasher --boot="$cmdline";
+	}
+
+	case "$gadget" in
+	rover)
+		# First comes the regular kernel command line.
+		cmdline="ubi.mtd=rootfs";
+		cmdline="$cmdline root=ubi0:rootfs";
+		cmdline="$cmdline rootfstype=ubifs";
+		cmdline="$cmdline rootflags=bulk_read,no_chk_data_crc";
+		cmdline="$cmdline rw console=ttyMT,log console=tty0";
+		#cmdline="$cmdline snd-soc-rx51.hp_lim=42";
+		#cmdline="$cmdline snd-soc-tlv320aic3x.hp_dac_lim=6";
+		#makes the command line too long
+
+		# Then we use perl to bring usb0 up.  We must be careful
+		# not to include spaces in the -e argument.
+		cmdline="$cmdline PATH=/sbin:/bin:/usr/bin";
+		cmdline="$cmdline init=/usr/bin/perl -e";
+		cmdline="$cmdline system'modprobe','g_nokia'";
+		cmdline="$cmdline;system'ifdown','usb0'";
+		cmdline="$cmdline;system'ifup','usb0'";
+		cmdline="$cmdline;exec'preinit'";
+		;;
+	*)
+		# From wall-to-wall the kernel command line can be 1024 chars
+		# at most, but a lot of junk is appended, which effectively
+		# leaves ~454 for us.  Let's leave some buffer too.
+		maxcmdline=450;
+
+		cmdline="root=/dev/mmcblk0p2 rootwait rootfst5";
+		#cmdline="$cmdline rootflags=errors=remount-ro";
+		#cmdline="$cmdline rootfstype=ext4 rw";
+		#cmdline="$cmdline mtdoops.mtddev=log";
+		#cmdline="$cmdline mtdoops.record_size=65536";
+		cmdline="$cmdline security=x";
+		;;
+	esac
+fi
+
+# This is only for $gadget != rover.
+mkpreinit()
+{
+	# Prepare a script (preinit.once), which we'll upload in a tarball
+	# and execute.  It does some one-time setup, writes another script
+	# which does some all-time necessary setup, then invokes the real
+	# preinit script.
+	rootpw="11PJVmgf9dhLY";
+	sshd="/usr/sbin/sshd";
+	path="/usr/sbin:/usr/bin:/sbin:/bin";
+	caps_h="/usr/include/linux/capability.h";
+	#restok="/var/lib/aegis/restok/restok.conf";
+
+	tardir=`mktemp -d`;
+	mkdir "$tardir/rootfs" "$tardir/rootfs/sbin";
+	preinit_once="$tardir/rootfs/sbin/preinit.once";
+
+	cat > "$preinit_once" << PREINIT_ONCE
+#!/bin/sh
+
+PATH="$path";
+
+# Permanently disable digsig and make g_nokia un-unloadable.
+[ ! -f /usr/sbin/validator-init ] \\
+	|| mv /usr/sbin/validator-init /usr/sbin/validator-init.disabled;
+chmod -x /sbin/rmmod;
+
+# Restore the root password.
+sed -e "s/^root:[^:]*/root:$rootpw/" -i /etc/passwd;
+
+# Make sshd privileged if it's not.
+PREINIT_ONCE
+
+	if [ "$restok" = "" ];
+	then
+		echo "# Hmm, maybe i'd rather not." >> "$preinit_once";
+		echo -n 'true';
+	elif [ -f "$caps_h" ];
+	then
+		allcaps=`perl -n -e 'print if s/^#\s*define\s+CAP_(\w+)\s+\d+$/\tCAP::\L$1/' < "$caps_h"`;
+		echo -n "grep -q '^Object: *$sshd\$' '$restok'";
+	else
+		allcaps='$allcaps';
+		echo "allcaps=\`perl -n -e 's{^Object:\s*$sshd$}{%caps=()}e and exit or s{\b(CAP::\w+)}{\$caps{\$1}=1}eg; END { print map(\"\t\$_\n\", keys(%caps)) }' '$restok'\`;";
+		echo -n '[ "$allcaps" = "" ]';
+	fi >> "$preinit_once"
+
+	cat >> "$preinit_once" << PREINIT_ONCE
+ || cat >> "$restok" << 'RESTOK_CONF';
+
+Package: me
+Source: com.nokia.maemo
+Request:
+$allcaps
+Object: $sshd
+
+RESTOK_CONF
+
+# Replace /sbin/preinit.
+[ -f /sbin/preinit.orig ] \\
+	|| mv /sbin/preinit /sbin/preinit.orig;
+cat > /sbin/preinit << 'PREINIT';
+#!/bin/sh
+
+PATH="$path";
+
+# Get out of MALF state and bring usb0 up.
+rm -f /var/malf /var/run/ifstate;
+modprobe g_nokia;
+ifup usb0;
+
+# Aegis-up.
+mount -t sysfs sysfs /sys;
+mount -t securityfs securityfs /sys/kernel/security;
+vdata="/etc/aegis_vdata";
+if [ -f "\$vdata" ];
+then
+	mv "\$vdata" "\$vdata.prev";
+	while read sha fname;
+	do
+	        sha1sum "\$fname";
+	done < "\$vdata.prev" > "\$vdata";
+
+	accli -c tcb-verify -F "\$vdata" > /dev/null \
+		|| accli -c tcb-sign -F "\$vdata" < "\$vdata" > /dev/null \
+		|| aegis-su -r tcb accli -c tcb-sign -F "\$vdata" \
+			< "\$vdata" > /dev/null;
+fi
+aegis-loader;
+umount /sys/kernel/security;
+umount /sys;
+
+# Pass control to the original preinit.
+exec /sbin/preinit.orig;
+PREINIT
+chmod +x /sbin/preinit;
+
+# Continue execution with our preinit.
+exec /sbin/preinit;
+PREINIT_ONCE
+
+	chmod +x "$preinit_once";
+	tar c -C "$tardir" rootfs > "$tardir/preinit_once.tar" 2> /dev/null;
+	cmdline="$cmdline init=/sbin/preinit.once";
+} # mkpreinit
+
+# Flash and/or boot.
+PATH="/tmp/flash:$PATH";
+if [ $# -eq 0 ];
+then
+	[ "$boot" = "yes" ] || exit 0;
+	[ "$gadget" = "rover" ] \
+		&& exec flasher --boot="$cmdline";
+	flasher --boot="$cmdline" \
+	| while read line;
+	do	# We may need to boot once again.
+		echo "$line";
+		[ "$line" = "WARNING: Boot parameters cannot be passed in this mode, rebooting" ] && bootit;
+	done
+	exit;
+elif [ -f "$1" -a `file -b --mime "$1"` = "application/x-tar" ];
+then	# Upload a tar and optionally reboot.
+	if [ "$gadget" = "rover" ];
+	then
+		echo "Out of luck" >&2;
+		exit 1;
+	elif [ $# -lt 2 ];
+	then
+		echo "I'll need an ape too." >&2;
+		exit 1;
+	fi
+
+	set -e;
+	flashit --boot --ape-algo="$2" --tar="$1";
+	bootit;
+	exit 0;
+elif [ -f "$1" -a `head -c 3 "$1"` = "UBI" ];
+then
+	flashit --boot="$cmdline" --rootfs="$1" || exit;
+else
+	set -e;
+	if [ "$gadget" = "rover" ];
+	then
+		if [ $# -gt 1 ];
+		then
+			echo "Sorry, can't do tar." >&2;
+			exit 1;
+		else
+			flashit --boot="$cmdline" --fiasco="$1";
+		fi
+	else
+		if [ "$boot" = "no" ];
+		then
+			echo "Need to boot for init." >&2;
+			exit 1;
+		fi
+
+		# Prepare the preinit.once we'll upload.
+		mkpreinit;
+
+		# Can't flash and boot with $cmdline at the same time.
+		# Also can't flash a FIASCO and upload a tar at once.
+		if [ "$2" != "init" ];
+		then
+			flasher --flash --fiasco="$1";
+			[ $# -eq 1 ] \
+				|| flasher --flash --ape-algo="$1" \
+					--tar="$2";
+		fi
+		flashit --boot --ape-algo="$1" \
+			--tar="$tardir/preinit_once.tar";
+		rm -r "$tardir";
+		bootit;
+	fi
+fi
+
+# We've flashed something.  If we've been invoked on behalf of a user,
+# let the caller know that we've flashed successfully.
+exit 23;
+
+# End of usboot

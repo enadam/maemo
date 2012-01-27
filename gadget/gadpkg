@@ -1,0 +1,37 @@
+#!/bin/sh
+#
+# gadpkg -- transfer to and install packages on the device in one go
+#
+# This script automates the ``scp something.deb gadget:; ssh gadget;
+# dpkg -i something.deb'' rituale.
+#
+# Synopsis:
+#  gadpkg [gadget=<gadget>] <debs>
+#
+# <debs> are transferred and installed together in a single ssh session.
+# For maximum efficiency you're advised to set up public key authentication
+# without password.
+#
+
+[ $# -gt 0 ] || exit;
+
+gadget="gadget";
+case "$1" in
+gadget=*)
+	gadget="${1#gadget=}";
+	shift;
+	;;
+esac
+
+tar c -- "$@" | ssh "$gadget" '
+dir=`mktemp -p . -d gadpkg.XXXXXX`;
+debs="";
+for deb in `tar xv -C "$dir"`;
+do
+	[ -f "$dir/$deb" ] && debs="$debs $dir/$deb";
+done
+AEGIS_FIXED_ORIGIN="com.nokia.maemo" dpkg -i $debs;
+rm -rf "$dir";
+';
+
+# End of gadpkg

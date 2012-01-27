@@ -1,0 +1,724 @@
+#!/bin/sh
+#
+# makehome.harmattan -- make your gadget comfortable
+#
+# This script contains many routines that make a gadget more suitable
+# for development.
+#
+# -- sets up public key ssh authentication (pubkey)
+# -- disables digsig checking (nosec), devlock (killdevlock, killtero)
+#    and removes the barcode (nobars)
+# -- ensures you have `sudo' and `gainroot'
+# -- disables rich core generation (cores) and the crash reporter (nocrap)
+# -- prevents pkgmgrd from blocking dpkg (pkgmgr)
+# -- enables backup (backup)
+#
+# -- makes the wired network availe to the gadget (usbnet),
+#    installs dummynet (dummynet), sets up the nameservers (nameres)
+#    and proxies (nokes)
+# -- enables IP forwarding and masquerading on the host
+# -- replaces the apt source repos with mrnc's (mrnc)
+#
+# -- make syslog user-readable (rwfiles)
+# -- make upstart commands available to user (upstart)
+# -- upload everything in makehome.d to gadget:/root (payload)
+# -- creates some reasonable .profile environment (profile),
+#    symlinks /home/usr/bin to /usr/local/bin (usrlocalbin)
+# -- creates /usr/bin/gainroot if it's not installed
+#
+# -- disables the welcome video (nohands) and cherry (nocherry)
+# -- prevents automatic display dimming and blanking (undim)
+# -- makes the device autorotate (autorot)
+# -- makes the launcher grid 5x3 (launcher)
+# -- makes the LPM animate more frequently (lpm)
+#
+# -- makes sure meego-im-uiserver is restarted when mcompositor is stopped
+#    (uiserver)
+#
+# -- [set up libartem for mcompositor]
+# -- [add visual startup finished notification]
+#
+# Usage:
+# -- boot the gadget and set up usbnet initially (`usboot' can be useful)
+# -- `ifup usb0' on the host (unless it's already up)
+# -- run `./makehome' on the host
+# -- be done until you reflash
+# -- run `./makehome -x' without argument just to upload the script
+#
+# Operation: makehome does the host setup first then copies and executes itself
+# on the gadget to finish the setup there.
+#
+
+set -e;
+
+# DNS BEGIN
+encode()
+{
+	perl -0777 -p -e '$_ = unpack("H*", $_)';
+	echo;
+}
+
+gadget="gadget";
+case "$1" in
+gadget=*)
+	gadget="${1#gadget=}";
+	shift;
+	;;
+esac
+
+if [ ! -w /dev/null ];
+then
+	echo "Something's screwed up /dev/null again." >&2;
+	exit 1;
+fi
+
+if ! grep -q "^Host $gadget\$" "$HOME/.ssh/config" 2> /dev/null;
+then
+	cat << EOT >> "$HOME/.ssh/config";
+
+Host $gadget
+	Hostname $gadget
+	User root
+	PubkeyAuthentication yes
+	PreferredAuthentications publickey,password
+	IdentityFile ~/.ssh/$gadget.key
+	StrictHostKeyChecking no
+	fi
+EOT
+fi
+
+if [ ! -f "$HOME/.ssh/$gadget.key" ];
+then
+	ssh-keygen -N '' -f "$HOME/.ssh/$gadget.key";
+	mv "$HOME/.ssh/$gadget.key.pub" "$HOME/.ssh/$gadget.pub";
+fi
+
+if [ `cat /proc/sys/net/ipv4/ip_forward` = "0" ];
+then
+	su -c '/sbin/iptables -t nat -A POSTROUTING -s gadget -j MASQUERADE \
+		&& echo 1 > /proc/sys/net/ipv4/ip_forward';
+fi
+
+[ "x$1" = "x-host" ] && exit;
+
+ssh-keygen -R "$gadget" -f ~/.ssh/known_hosts;
+if [ "x$1" = "x-n" ];
+then
+	setitup="";
+elif [ $# -eq 0 ];
+then
+	setitup="./setup";
+else
+	setitup="./setup $*";
+fi
+
+(
+	awk "/^# DNS BEGIN/{d=1} /^# DNS END/{d=0; next} !d{print}" $0;
+	echo "exit";
+
+	if [ "$LINES" = "" -o "$COLUMNS" = "" ];
+	then
+		scr=`stty size`;
+		[ "$LINES" = "" ] \
+			&& LINES="${scr% *}";
+		[ "$COLUMNS" = "" ] \
+			&& COLUMNS="${scr#* }";
+	fi
+
+	echo;
+	echo "BEGIN_lines_columns";
+	[ "$LINES" != "" ] \
+		&& echo "[ -n \"\$LINES\" ] || export LINES=$LINES;";
+	[ "$COLUMNS" != "" ] \
+		&& echo "[ -n \"\$COLUMNS\" ] || export COLUMNS=$COLUMNS;";
+	echo "END_lines_columns";
+	echo;
+	echo "BEGIN_resolv.conf";
+	cat "/etc/resolv.conf";
+	echo "END_resolv.conf";
+	echo;
+	echo "BEGIN_gadget.pub";
+	cat "$HOME/.ssh/$gadget.pub";
+	echo "END_gadget.pub";
+
+	if [ -L "$0" ];
+	then
+		dir=$(dirname $(readlink $0));
+	else
+		dir=$(dirname $0);
+	fi
+
+	payloads="";
+	for payload in $dir/makehome.d/*;
+	do
+		fname=`basename "$payload"`;
+		if [ -f "$payload" ];
+		then
+			echo;
+			echo "BEGIN_$fname";
+			encode < "$payload";
+			echo "END_$fname";
+		elif [ -L "$payload" ];
+		then
+			url=`readlink "$payload"`;
+
+			echo;
+			echo "BEGIN_$fname";
+			wget -q -O - "$url" | encode;
+			echo "END_$fname";
+		else
+			continue;
+		fi
+
+		payloads="$payloads $fname";
+	done
+
+	echo;
+	echo "PAYLOADS:";
+	echo "$payloads";
+) | ssh "$gadget" "cat > setup; chmod +x setup; echo 0 > /sys/kernel/security/digsig/enabled; $setitup";
+exit;
+# DNS END
+
+# Execute ourselves as root.
+if [ `id -u` -ne 0 ];
+then
+	echo "$0" "$@" | sudo gainroot;
+	exit;
+fi
+
+# Utils
+decode()
+{
+	perl -0777 -p -e '$_ = pack("H*", $_)';
+}
+
+extract()
+{
+	awk "/^BEGIN_$1/{d=1; next} /^END_$1/{exit} d{print}" $0;
+}
+
+copy()
+{
+	extract "$1" > "$2";
+}
+
+copybin()
+{
+	extract "$1" | decode > "$2";
+}
+
+sedit() {
+	sed="$1";
+	shift;
+
+	changed=0;
+	for fname;
+	do
+		tmp=`mktemp`;
+		sed -e "$sed" < "$fname" > "$tmp";
+		if ! cmp -s "$tmp" "$fname";
+		then
+			cat "$tmp" > "$fname";
+			changed=1;
+		fi
+		rm "$tmp";
+	done
+
+	return $changed;
+}
+
+# Setup
+scripts="$scripts pubkey";
+pubkey() {
+	if [ ! -f /root/.ssh/authorized_keys ];
+	then
+		[ -d /root/.ssh ] || mkdir /root/.ssh;
+		copy gadget.pub /root/.ssh/authorized_keys;
+	fi
+}
+
+scripts="$scripts nosec";
+nosec() {
+	rm -f /usr/sbin/validator-init;
+	echo 0 > /sys/kernel/security/digsig/enabled;
+}
+
+scripts="$scripts killdevlock";
+killdevlock() {
+	stop xsession/devicelockd || true;
+	echo -n > /etc/init/xsession/devicelockd.conf;
+	echo -n > /etc/init/xsession/ui-startup/start-devlock.conf;
+}
+
+scripts="$scripts killtero";
+install_killtero="started xsession/devicelockd";
+killtero() {
+        initctl emit --no-wait DEVICE_LOCK_DONE;
+        initctl emit --no-wait DEVICE_FPROV_DONE;
+}
+
+scripts="$scripts nobars";
+nobars() {
+	for bars in  /etc/init/barcode.conf /etc/init/test/barcode.conf;
+	do
+		if [ -s "$bars" ];
+		then
+			css="/usr/share/themes/base/meegotouch/sysuid/style/statusarea.css";
+			grep -v barcode "$css" > "$css.new";
+			mv "$css.new" "$css";
+			echo -n > "$bars";
+			restart="$restart sysuid";
+		fi
+	done
+}
+
+scripts="$scripts gainroot";
+gainroot() {
+	if [ ! -x /usr/bin/sudo ];
+	then
+		if [ -x /usr/bin/aegis-su ];
+		then
+			echo '#!/bin/sh' \
+				>> /usr/bin/sudo;
+			echo 'PATH="/usr/sbin:/sbin:$PATH";' \
+				>> /usr/bin/sudo;
+			echo 'exec aegis-su -u root -c - -l "$@";' \
+				>> /usr/bin/sudo;
+			chmod 755 /usr/bin/sudo;
+		else
+			copybin minisudo /usr/bin/sudo;
+			chmod 6755 /usr/bin/sudo;
+		fi
+	fi
+
+	if [ ! -x /usr/bin/gainroot ];
+	then
+		ln -s /bin/sh /usr/bin/gainroot;
+	fi
+}
+
+scripts="$scripts cores";
+install_cores="started sysconfig-late";
+cores() {
+	if [ ! -d /home/user/core-dumps ];
+	then
+		mkdir /home/user/core-dumps;
+		chown root /home/user/core-dumps;
+		chmod  777 /home/user/core-dumps;
+	fi
+	echo '/home/user/core-dumps/%e.core' > /proc/sys/kernel/core_pattern;
+}
+
+scripts="$scripts nocrap";
+nocrap() {
+	if [ -s /etc/init/xsession/crash-reporter-daemon.conf ];
+	then
+		stop xsession/crash-reporter-daemon || true;
+		echo -n > /etc/init/xsession/crash-reporter-daemon.conf;
+	fi
+
+	if [ -s /etc/init/rich-core-pattern.conf ];
+	then
+		stop rich-core-pattern || true;
+		echo -n > /etc/init/rich-core-pattern.conf;
+	fi
+}
+
+scripts="$scripts pkgmgr";
+pkgmgr() {
+	if [ -s /etc/init/xsession/pkgm-timed-checks.conf ];
+	then
+		/usr/lib/package-manager/timedtasker --cancel-event;
+		pkill pkgmgrd || true;
+		echo -n > /etc/init/xsession/pkgm-timed-checks.conf;
+	fi
+}
+
+scripts="$scripts backup";
+backup() {
+	mkdir -p /home/user/.backup-framework;
+	touch /home/user/.backup-framework/isautotesting;
+}
+
+scripts="$scripts usbnet";
+usbnet() {
+	cat > /etc/init/select-usb-module.conf << EOT
+post-start script
+	set +e;
+	rmmod g_file_storage;
+	modprobe g_nokia;
+	ifup usb0;
+end script
+EOT
+}
+
+scripts="$scripts dummynet";
+dummynet() {
+	if [ ! -f /etc/gconf/schemas/libicd-network-dummy.schemas ];
+	then
+		[ -f dummynet.deb ] || copybin dummynet.deb dummynet.deb;
+		pkill pkgmgrd || true;
+		dpkg -i dummynet.deb;
+		rm dummynet.deb;
+	fi
+}
+
+scripts="$scripts nameres";
+nameres() {
+	copy resolv.conf /etc/resolv.conf.usb0;
+	if ! grep -q resolv.conf.usb0 /etc/dnsmasq.conf;
+	then
+		echo "resolv-file=/etc/resolv.conf.usb0" >> /etc/dnsmasq.conf;
+	fi
+	if [ -f /var/run/dnsmasq.pid ];
+	then
+		kill `cat /var/run/dnsmasq.pid` || true;
+	fi
+}
+
+scripts="$scripts nokes";
+nokes() {
+	pfx="/system/osso/connectivity/IAP/DUMMY";
+	gconftool-2 -s "$pfx/proxytype"		-t string MANUAL;
+	gconftool-2 -s "$pfx/proxy_http"	-t string nokes.nokia.com;
+	gconftool-2 -s "$pfx/proxy_http_port"	-t int 8080;
+	gconftool-2 -s "$pfx/proxy_https"	-t string nokes.nokia.com;
+	gconftool-2 -s "$pfx/proxy_https_port"	-t int 8080;
+
+	pfx="/system/http_proxy";
+	gconftool-2 -s "$pfx/host"		-t string nokes.nokia.com;
+	gconftool-2 -s "$pfx/port"		-t int 8080;
+	gconftool-2 -s "$pfx/use_http_proxy"	-t bool TRUE;
+
+	pfx="/system/proxy";
+	gconftool-2 -s "$pfx/mode"		-t string manual;
+	gconftool-2 -s "$pfx/secure_host"	-t string nokes.nokia.com;
+	gconftool-2 -s "$pfx/secure_port"	-t int 8080;
+	gconftool-2 -s "$pfx/ftp_host"		-t string nokes.nokia.com;
+	gconftool-2 -s "$pfx/ftp_port"		-t int 8080;
+	gconftool-2 -s "$pfx/rtsp_host"		-t string nokes.nokia.com;
+	gconftool-2 -s "$pfx/rtsp_port"		-t int 8080;
+}
+
+scripts="$scripts mrnc";
+mrnc() {
+	copy apt.conf /etc/apt/apt.conf.d/20-mrnc;
+	rm -f /etc/apt/sources.list.d/ssu-repository.list;
+	copy sources.list /etc/apt/sources.list.d/mrnc.list;
+	copy pia /usr/lib/apt/methods/pia;
+	[ -d /var/log/apt ] \
+		|| mkdir /var/log/apt;
+}
+
+scripts="$scripts rwfiles";
+rwfiles() {
+	chmod 644 /var/log/syslog;
+}
+
+scripts="$scripts upstart";
+upstart() {
+	if [ -x /usr/sbin/update-sudoers -a ! -f /etc/sudoers.d/upstart ];
+	then
+		echo 'user ALL = NOPASSWD: /sbin/initctl' \
+			> /etc/sudoers.d/upstart;
+		update-sudoers;
+	fi
+}
+
+scripts="$scripts profile";
+profile() {
+	# Overwrite .bashrc
+	copy root_bashrc /root/.bashrc;
+	extract lines_columns >> /root/.bashrc;
+
+	if [ ! -d /home/user/tmp ];
+	then
+		mkdir /home/user/tmp;
+		chown user.users /home/user/tmp;
+	fi
+	[ -e /root/tmp ] \
+		|| ln -s /home/user/tmp /root/tmp;
+
+	if [ ! -f /home/user/.profile ];
+	then
+		echo "No user .profile, expect trouble." >&2;
+	elif ! grep -q '^### makehome ###$' /home/user/.profile;
+	then
+		(
+			echo;
+			echo '### makehome ###';
+			extract user_profile;
+			extract lines_columns;
+		) >> /home/user/.profile;
+	fi
+}
+
+scripts="$scripts usrlocalbin";
+usrlocalbin() {
+	if [ ! -d /usr/local/bin ] || rmdir /usr/local/bin 2>/dev/null;
+	then
+		ln -s /home/user/bin   /usr/local/bin;
+	elif [ ! /usr/local/bin/. -ef /home/user/bin/. ];
+	then
+		ln -s /home/user/bin/* /usr/local/bin;
+	fi
+}
+
+scripts="$scripts payload";
+payload() {
+	payloads=`tail -1 "$0"`;
+	for payload in $payloads;
+	do
+		rm -f "$payload";
+		copybin "$payload" "$payload";
+		if [ `dd if="$payload" bs=1 skip=1 count=3 2> /dev/null` = "ELF" ];
+		then
+			chmod +x "$payload";
+		fi
+	done
+}
+
+scripts="$scripts nohands";
+nohands() {
+	cat > /etc/init/xsession/mwelcome.conf << EOT
+script
+    exit 0
+end script
+EOT
+}
+
+scripts="$scripts nocherry";
+nocherry() {
+	cat > /etc/init/xsession/cherryui.conf << EOT
+script
+	exec initctl emit --no-wait CHERRYUI_DONE
+end script
+EOT
+}
+
+# 0 - no inhibit
+# 1 - inhibit dim with charger
+# 2 - inhibit blank with charger (display still dims)
+# 3 - inhibit dim (always)
+# 4 - inhibit blank (always; display still dims)
+scripts="$scripts undim";
+install_undim="started xomap";
+undim() {
+	gconftool-2 -s /system/osso/dsm/display/display_brightness    -t int --   5;
+	gconftool-2 -s /system/osso/dsm/display/display_dim_timeout   -t int -- 120;
+	gconftool-2 -s /system/osso/dsm/display/display_blank_timeout -t int --  -1;
+	gconftool-2 -s /system/osso/dsm/display/inhibit_blank_mode    -t int --   4;
+}
+
+scripts="$scripts autorot";
+autorot() {
+	sedit '/^ *locked-orientation: *"portrait";/d' /usr/share/themes/base/meegotouch/meegotouchhome/style/meegotouchhome.css \
+	|| restart="$restart meegotouchhome";
+}
+
+scripts="$scripts launcher";
+launcher() {
+	sedit '
+/^LauncherPageStyle.Portrait {$/,/^}$/{
+	s/^\([ 	]*padding-\(left\|right\):\).*/\1 0.0mm;/;
+}
+
+/^SwipeLauncherButtonStyle {$/,/^}$/{
+	s/^\([ 	]*font:\).*/\1 $FONT_DEFAULT;/;
+	s/^\([ 	]*\(minimum\|preferred\|maximum\)-size:\).*/\1 15.3mm 11mm;/;
+}' /usr/share/themes/base/meegotouch/meegotouchhome/style/meegotouchhome.css \
+	|| restart="$restart meegotouchhome";
+}
+
+# Not run automatically.
+lpm() {
+	sedit '/^LockScreenLowPowerModeStyle {/,/^}/{s/\(animation-\(interval\|delay\): *\)[0-9]*/\11500/}' /usr/share/themes/base/meegotouch/libsysuid-screenlock-nokia/style/libsysuid-screenlock-nokia.css || restart="$restart sysuid";
+}
+
+scripts="$scripts uiserver";
+install_uiserver="stopped xsession/meego-im-uiserver";
+uiserver() {
+	[ -f /tmp/no-uiserver-restart ] \
+		|| initctl start xsession/meego-im-uiserver 2> /dev/null \
+		|| true;
+}
+
+#scripts="$scripts artemize";
+#artemize() {
+#	[ -d /etc/artem ] || mkdir /etc/artem;
+#	[ -d /etc/artem/mcompositor ] \
+#		|| mkdir /etc/artem/mcompositor;
+#	[ -L /etc/artem/mcompositor/output ] \
+#		|| ln -s /var/tmp/ide /etc/artem/mcompositor/output;
+#	[ -L /etc/artem/mcompositor/daemon ] \
+#		|| ln -s . /etc/artem/mcompositor/daemon;
+#	chown -hR user.users /etc/artem;
+#
+#	if ! grep -q /root/libartem.so /etc/ld.so.preload 2> /dev/null;
+#	then
+#		echo /root/libartem.so >> /etc/ld.so.preload;
+#	fi
+#}
+
+#scripts="$scripts rtg"
+#rtg() {
+#	if [ ! -f /etc/X11/Xsession.post/05ready_to_go ];
+#	then
+#		copy ready_to_go /etc/X11/Xsession.post/05ready_to_go;
+#		chmod 755 /etc/X11/Xsession.post/05ready_to_go;
+#	fi
+#}
+
+if [ "x$1" = "x-x" ];
+then
+	exit 0;
+elif [ "x$1" = "x-n" ];
+then
+	opt_noinst="yes";
+	shift;
+else
+	opt_noinst="no";
+fi
+
+[ $# -gt 0 ] || set -- $scripts;
+if [ "$1" = "micro" ];
+then
+	shift;
+	set --	pubkey gainroot rwfiles profile usrlocalbin "$@";
+elif [ "$1" = "mini" ];
+then
+	shift;
+	set --	pubkey gainroot cores nocrap pkgmgr backup \
+		usbnet nameres \
+		rwfiles upstart profile usrlocalbin \
+		uiserver \
+		"$@";
+fi
+if [ "$1" = "more" ];
+then
+	shift;
+	set -- "$@" dummynet launcher nobars autorot;
+fi
+
+restart="";
+for script;
+do
+	echo "Running $script...";
+	$script;
+
+	[ "$opt_noinst" = "no" ] \
+		|| continue;
+	eval [ "\"\$install_$script\"" ] \
+		|| continue;
+	[ ! -f "/etc/init/$script.conf" ] \
+		|| continue;
+
+	echo "Installing $script...";
+	(
+		eval echo "start on \$install_$script";
+		echo "console output";
+		echo "script";
+		awk "/^$script\(\) *\\{/{d=1; next} d{if(/^\}$/)exit; print}" $0;
+		echo "end script";
+	) > "/etc/init/$script.conf";
+done
+
+if [ "$restart" != "" ];
+then
+	echo Restarting $restart;
+	for proc in $restart; do pkill "$proc"; done
+fi
+
+sync;
+exit;
+
+# Data
+BEGIN_root_bashrc
+alias l='ls -al';
+alias lx='ls -C';
+alias cp='cp -i';
+alias mv='mv -i';
+alias u='su - user';
+export DISPLAY=":0";
+export AEGIS_FIXED_ORIGIN="com.nokia.maemo";
+export M_OUTPUT_LEVEL="debug";
+END_root_bashrc
+
+BEGIN_user_profile
+HISTFILE="$HISTFILE.$$";
+PATH="/home/user/bin:/root:$PATH";
+alias l='ls -al';
+alias lx='ls -C';
+alias cp='cp -i';
+alias mv='mv -i';
+END_user_profile
+
+BEGIN_apt.conf
+APT::Get::AllowUnauthenticated 1;
+END_apt.conf
+
+BEGIN_sources.list
+deb pia://maemo.research.nokia.com/repository/harmattan default/unreleased adobe art eff hanwang modified nokia-closed nokia-open ossw real ti zi nokia-maps drm odnp nuance nokia-emc skype
+END_sources.list
+
+BEGIN_ready_to_go
+#!/bin/sh
+#
+# /etc/X11/Xsession.post/05ready_to_go -- notify me when the desktop is usable
+#
+
+if [ -n "$SESSIONFILE" ];
+then
+	# We're being sourced by /etc/X11/Xsession, let's go
+	# into the background.
+	$SESSIONFILE &
+else
+	# Wait until the CPU is >=60% idle on average over three seconds.
+	top -d 1 -b | python -c "
+#!/usr/bin/python2.5
+
+import sys, re
+import gobject, gtk, pygtk, pango
+
+win = gtk.Window()
+label = gtk.Label('...')
+label.modify_font(pango.FontDescription('200'));
+win.add(label)
+
+win.realize()
+win.window.property_change('_NET_WM_WINDOW_TYPE',
+	'ATOM', 32, gtk.gdk.PROP_MODE_REPLACE,
+	[gtk.gdk.atom_intern('_NET_WM_WINDOW_TYPE_NOTIFICATION')])
+win.window.property_change('_HILDON_NOTIFICATION_TYPE',
+	'STRING', 8, gtk.gdk.PROP_MODE_REPLACE,
+	'_HILDON_NOTIFICATION_TYPE_BANNER')
+win.show_all()
+
+idles = []
+re =  re.compile(' (\d+)(\.\d+)?% idle ')
+def fun(a, b):
+        m = re.search(sys.stdin.readline())
+        if m != None:
+		idle = m.group(1)
+		idles.append(int(idle))
+		if len(idles) > 3:
+			del idles[0]
+			if sum(idles) / len(idles) > 60:
+				label.set_text('Go!')
+				win.add_events(gtk.gdk.BUTTON_PRESS_MASK)
+				win.connect('button-press-event',
+					lambda a, b: sys.exit(0))
+				return False;
+                label.set_text(idle+'%')
+        return True
+gobject.io_add_watch(sys.stdin, gobject.IO_IN, fun)
+
+gtk.main()
+"
+fi
+
+# End of 05ready_to_go
+END_ready_to_go
+
+# End of makehome.harmattan

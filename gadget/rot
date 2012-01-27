@@ -1,0 +1,112 @@
+#!/bin/sh
+#
+# rot -- fake device rotation
+#
+# This program fakes accelerometer readings, making the system belive
+# that the device has rotated.
+#
+# Synopsis:
+#   rot [-stdout] [-lp] [-i|<time>]
+#
+# Options:
+#   -stdout:	print the fake sensor data but don't use it
+#   -l:		rotate to landscape
+#   -p:		rotate to portrait
+#   -i:		interactively alternate between portrait and landscape
+#   <time>:	non-interactively alternate rotation waiting in between
+#
+# Example: "rot -l 1" is:
+# while :;
+# do
+#         z="\0\0\0\0\0\0\0\0";
+#         zz="$z\3\0\2\0\0\0\0\0";
+#         rota="$z$z$z\3\0\0\0\350\3\0\0$z\3\0\1\0\1\0\0\0$zz";
+#         rotb="$z$z$z\3\0\1\0\350\3\0\0$z\3\0\0\0\1\0\0\0$zz";
+#         echo -ne "$rota$rota$rota"; sleep 1;
+#         echo -ne "$rotb$rotb$rotb"; sleep 1;
+# done > /dev/input/accelerometer
+#
+
+# Construct the fake struct input_event sensor data.
+zz="\0\0";
+t="$zz$zz$zz$zz";		# time as struct timeval (ignored by sensord)
+x="\3\0\0\0"; a="\350\3";	# x=EV_ABS,ABS_X; a=1000
+y="\3\0\1\0"; b="\001\0";	# y=EV_ABS,ABS_Y; b=1
+z="\3\0\2\0"; c="\000\0";	# z=EV_ABS,ABS_Z; c=0
+
+syn="$t$zz$zz$zz$zz";		# EV_SYN
+lscape="$syn""$t$x$a$zz""$t$y$b$zz""$t$z$c$zz"; # ABS_X=a, ABS_Y=b, ABS_Z=c
+ptrait="$syn""$t$x$b$zz""$t$y$a$zz""$t$z$c$zz"; # ABS_X=b, ABS_Y=a, ABS_Z=c
+
+# Parse the command line.
+if [ "x$1" = "x-stdout" ];
+then
+	shift;
+else
+	exec > /dev/input/accelerometer;
+fi
+
+rot="$lscape";
+if [ "x$1" = "x-l" ];
+then
+	shift;
+elif [ "x$1" = "x-p" ];
+then
+	rot="$ptrait";
+	shift;
+fi
+
+# Do the initial rotation.
+echo -ne "$rot$rot$rot";
+[ $# -gt 0 ] || exit;
+
+if [ "x$1" = "x-i" -o $1 -eq 0 ];
+then
+	while :;
+	do
+		# Prompt
+		if [ "$rot" = "$lscape" ];
+		then
+			echo -n 'lscape> ';
+		else
+			echo -n 'ptrait> ';
+		fi >&2;
+		read line || break;
+
+		# Alternate or not.
+		if [ "$line" != "" ];
+		then
+			:;
+		elif [ "$rot" = "$lscape" ];
+		then
+			rot="$ptrait";
+		else
+			rot="$lscape";
+		fi
+
+		echo -ne "$rot$rot$rot";
+	done
+else
+	while :;
+	do
+		# Try to keep the rotation stable.
+		# Avoid calling sleep(1) because that's not a builtin
+		# in busybox.
+		perl -e '$|=1; for (1..shift()/0.1)
+			{select($u,$u,$u,0.1); print "\n"}' $1 \
+		| while read;
+		do
+			echo -ne "$rot";
+		done
+
+		# Alternate
+		if [ "$rot" = "$lscape" ];
+		then
+			rot="$ptrait";
+		else
+			rot="$lscape";
+		fi
+	done
+fi
+
+# End of rot

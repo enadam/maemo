@@ -1,0 +1,31 @@
+diff -u a/Makefile.am b/Makefile.am
+--- a/Makefile.am	2007-06-19 00:35:05.000000000 +0300
++++ b/Makefile.am	2011-07-29 00:24:05.000000000 +0300
+@@ -17,6 +17,11 @@
+ bin_PROGRAMS = pkg-config
+ AM_CFLAGS=@WARN_CFLAGS@
+ 
++devkit_libdir = /scratchbox/devkits/qt/lib
++AM_LDFLAGS = -Wl,-rpath -Wl,$(devkit_libdir)
++AM_LDFLAGS += -Wl,--dynamic-linker -Wl,$$DEVKIT_LIBDIR/ld-linux.so.2
++AM_LIBS += -ldl
++
+ INCLUDES=-DPKG_CONFIG_PC_PATH="\"$(pc_path)\"" $(included_glib_includes)
+ 
+ pkg_config_SOURCES= \
+diff -u a/Makefile.in b/Makefile.in
+--- a/Makefile.in	2007-06-19 00:36:04.000000000 +0300
++++ b/Makefile.in	2011-07-29 00:26:48.000000000 +0300
+@@ -74,8 +74,11 @@
+ INSTALL_SCRIPT = @INSTALL_SCRIPT@
+ INSTALL_STRIP_PROGRAM = @INSTALL_STRIP_PROGRAM@
+ LDFLAGS = @LDFLAGS@
++DEVKIT_LIBDIR = /scratchbox/devkits/qt/lib
++LDFLAGS += -Wl,-rpath -Wl,$(DEVKIT_LIBDIR)
++LDFLAGS += -Wl,--dynamic-linker -Wl,$(DEVKIT_LIBDIR)/ld-linux.so.2
+ LIBOBJS = @LIBOBJS@
+-LIBS = @LIBS@
++LIBS = @LIBS@ -ldl
+ LIBTOOL = @LIBTOOL@
+ LN_S = @LN_S@
+ LTLIBOBJS = @LTLIBOBJS@

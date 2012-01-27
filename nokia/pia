@@ -1,0 +1,200 @@
+#!/usr/bin/perl -w
+#
+# pia -- Password INquiring Acquisitor
+#
+# This is an acquisition method for apt which can ask interactively for the
+# username and password necessary for accessing a repository, and forwards
+# them to another acquisition method which does the real job then.  This is
+# to relieve you from leaving your password in sources.list, while requiring
+# very slight configuration changes, imposing very light overhead, and being
+# all but invisible to apt and the real methods.
+#
+# To use this method you just need to drop this script in the lib/apt/methods
+# directory of your system, and replace the URI schemata in sources.list with
+# "pia" like this:
+#
+# * pia://maemo.research.nokia.com/repository/harmattan/...
+#   When apt accesses this repository pia will ask for your username and
+#   password interactively, adds them to to the URL, then passes it to the
+#   appropriate method as an https URL.  pia remembers what you entered,
+#   and doesn't ask it again.
+# * pia://bela:$Password@maemo.research.nokia.com/repository/harmattan/...
+#   You can presupply your user name this way, which would be "bela"
+#   in this case.
+# * pia://$SomeUser:$SomePassword@maemo.research.nokia.com/repository/harmattan/...
+#   '$'-prefixed labels indicate that the username and/or password of this
+#   repository is different from the others'.  This can be useful when you
+#   have multiple repositories in your sources.list protected by different
+#   passwords.
+#
+# pia works by proxying between apt and the real acquisition method,
+# translating URIs and mapping back them, so its operation remains
+# invisible to apt.  Since file or data doesn't pass it, it has only
+# a minimal overhead, and is easily deployable anywhere.
+#
+
+# Modules
+use strict;
+use FindBin;
+use POSIX qw(:sys_wait_h);
+use Fcntl qw(F_SETFL O_NONBLOCK);
+
+# Private constants
+# $ME is the name by which apt recognizes us, and it must match the
+# script name.  $MATE is the name of the real acquisition method
+# we will talk to, and we must reside in the same directory.
+my $ME   = $FindBin::Script;
+my $MATE = 'https';
+
+# Private functions
+# Ask something from the user without echoing it back on the terminal.
+sub ask
+{
+	my $ans;
+	local *TTY;
+
+	# Force a newline out of apt.
+	syswrite(STDOUT, "102 Status\nMessage: :)))\n");
+	open(TTY, '+<', '/dev/tty');
+	system(qw(stty -F /dev/tty -echo));
+	print TTY "\n", @_, ": ";
+	chomp($ans = <TTY>);
+	system(qw(stty -F /dev/tty  echo));
+	close(TTY);
+
+	return $ans;
+}
+
+# Main starts here
+my $mate;
+my ($stdin, $sin);
+my (%usernames, %passwords, %map);
+
+# Start $MATE and communicate with it through pipes.
+pipe(SINI, SEX);
+pipe(SIN,  SEXY);
+if (!($mate = fork()))
+{	# $MATE: SINI <=> SEXY
+	close(SIN);
+	close(SEX);
+
+	if (defined $mate)
+	{
+		if (fileno(STDIN) != fileno(SINI))
+		{	# STDIN := SINI
+			open(STDIN, '<&', \*SINI);
+			close(SINI);
+		}
+		if (fileno(STDOUT) != fileno(SEXY))
+		{	# STDOUT := SEXY
+			open(STDOUT, '>&', \*SEXY);
+			close(SEXY);
+		}
+	} else
+	{	# fork() failed, it's probably warned already.
+		close(SINI);
+		close(SEXY);
+	}
+
+	# $MATE is expected to reside in the same directory as we do.
+	exec { "$FindBin::Bin/$MATE" } $MATE;
+	exit 100;
+} else
+{	# $ME: SIN <=> SEX
+	close(SINI);
+	close(SEXY);
+}
+
+# Exit with $mate's exit code.
+$SIG{'CHLD'} = sub
+{	# We catch system() too.
+	my $pid = waitpid($mate, WNOHANG);
+	return if !defined $pid || $pid != $mate;
+
+	# Just abort if $mate died.
+	exit(WEXITSTATUS($?)) if WIFEXITED($?);
+	kill('ABRT', $$);
+};
+
+# Ignore SIGPIPE to allow the SIGCHLD handler to do its job.
+$SIG{'PIPE'} = 'IGNORE';
+
+# The main loop.  Read and transform commands and responses between
+# apt and $mate and only block if we don't have any input to read.
+$stdin = $sin = '';
+fcntl(STDIN, F_SETFL, O_NONBLOCK);
+fcntl(SIN,   F_SETFL, O_NONBLOCK);
+for (;;)
+{
+	my ($rin, $win);
+
+	# Wait until there's something to read.
+	$rin = '';
+	vec($rin, fileno(STDIN), 1) = 1;
+	vec($rin, fileno(SIN),   1) = 1;
+	select($rin, undef, undef, undef) >= 0
+		or die "$!";
+
+	# Read whatever we can, but don't block.
+	do { while (sysread(STDIN, $stdin, 4096, length($stdin))) { } }
+		if vec($rin, fileno(STDIN), 1);
+	do { while (sysread(SIN,   $sin,   4096, length($sin)))   { } }
+		if vec($rin, fileno(SIN),   1);
+
+	# Process all complete command lines from apt.
+	while ($stdin =~ s/^(.*?\n)//s)
+	{
+		my ($user, $userlabel);
+		my ($pass, $passlabel);
+		my ($original, $translated);
+
+		# Relay without transformation if it doesn't contain an URI.
+		# Otherwise save the $original.
+		$_ = $1;
+		next unless s!^URI: ($ME://)!!o;
+		chop($original = $1.$_);
+
+		# Parse the address.
+		if (s/^\$(.*?):\$(.*?)@//)
+		{	# pia://$Akarmi:$Valami@valahol
+			($userlabel, $passlabel) = ($1, $2);
+		} elsif (s/^(.*?):\$(.*?)@//)
+		{	# pia://jozsi:$Valami@valahol
+			($user,      $passlabel) = ($1, $2);
+		} else
+		{	# pia://valahol
+			$userlabel = 'Username';
+			$passlabel = 'Password';
+		}
+
+		# Ask $user and $pass if they aren't known yet.
+		defined $user || defined ($user = $usernames{$userlabel})
+			or $user = $usernames{$userlabel} = ask($userlabel);
+		defined ($pass = $passwords{$passlabel})
+			or $pass = $passwords{$passlabel} = ask($passlabel);
+
+		# Construct the new URI and remember the $original one,
+		# so we can transform it back.
+		$_ = "$MATE://$user:$pass\@$_";
+		chop($translated = $_);
+		$map{$translated} = [ qr/\Q$translated\E/, $original ]
+			unless defined $map{$translated};
+		$_ = "URI: $_";
+	} continue
+	{
+		syswrite(SEX, $_);
+	}
+
+	# Process complete response lines from $mate.
+	while ($sin =~ s/^(.*?\n)//s)
+	{	# Transform back every URI, so apt won't be confused.
+		my $line = $1;
+		$line =~ s/$_->[0]/$_->[1]/ge
+			foreach values(%map);
+		syswrite(STDOUT, $line);
+	}
+}
+
+[live fast] and die-hard
+
+# End of pia

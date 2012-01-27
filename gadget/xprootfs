@@ -1,0 +1,50 @@
+#!/bin/sh
+#
+# xprootfs -- extract a rootfs.tar.gz
+#
+# This utility helps you to unpack a rootfs tarball such that you can
+# customize it, and create a customize rootfs image from it.
+#
+# Synopsis:
+#   xprootfs [-x] [[<rootfs.tar.gz>] [<target-dir>]]
+#
+# will create <target-dir> ("rootfs" by default) and extract <rootfs.tar.gz>
+# in it, preserving file owners, modes and everything.  -x blows <target-dir>
+# before anything else.
+#
+
+# We need to be root to extract the tarball faithfully.
+[ $UID -eq 0 ] || exec su -c "$0 $*";
+
+rootfs="arm-rd-rootfs.tgz";
+root="rootfs";
+kill="no";
+
+# Parse the command line.
+if [ "x$1" = "x-x" ];
+then
+	kill="yes";
+	shift;
+fi
+
+if [ $# -gt 0 ];
+then
+	rootfs="$1";
+	shift;
+
+	if [ $# -gt 0 ];
+	then
+		root="$1";
+		shift;
+	fi
+fi
+
+# Create $root.
+set -e;
+[ "$kill" = "yes" ] && rm -rf "$root";
+mkdir "$root";
+
+# Run
+exec tar xzf "$rootfs" -C "$root" --numeric-owner;
+
+# End of xprootfs

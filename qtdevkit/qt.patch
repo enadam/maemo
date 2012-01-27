@@ -1,0 +1,109 @@
+diff --git a/debian/rules b/debian/rules
+index ab92068..9f7de29 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -118,7 +118,7 @@ ifeq ($(DEB_HOST_ARCH_OS),linux)
+ 		CONFIG_BUILD_OPT = -release
+ 	else
+ 		GL_BACKEND=desktop
+-		CONFIG_BUILD_OPT = -debug
++		CONFIG_BUILD_OPT = -release
+ 	endif
+ else
+ 	TARGET_PLATFORM = glibc-g++
+@@ -197,7 +197,7 @@ config.status:
+ 				$(FORCE_PKG_CONFIG_FLAG) \
+ 				-arch $(CONFIG_ARCH_OPT) \
+ 				-fast \
+-				-no-optimized-qmake \
++				-optimized-qmake \
+ 				-reduce-relocations \
+ 				-no-separate-debug-info \
+ 				-no-rpath \
+diff --git /dev/null b/devkit.pri
+--- /dev/null
++++ b/devkit.pri
+@@ -0,0 +1,4 @@
++DEVKIT_LIBDIR = /scratchbox/devkits/qt/lib
++QMAKE_LFLAGS += -Wl,-rpath -Wl,$$DEVKIT_LIBDIR
++QMAKE_LFLAGS += -Wl,--dynamic-linker -Wl,$$DEVKIT_LIBDIR/ld-linux.so.2
++LIBS += -ldl
+diff --git a/qmake/qmake.pri b/qmake/qmake.pri
+index 3a0ab12..93df8db 100644
+--- a/qmake/qmake.pri
++++ b/qmake/qmake.pri
+@@ -154,3 +154,5 @@ bootstrap { #Qt code
+ }
+ 
+ PRECOMPILED_HEADER = qmake_pch.h
++
++include(../devkit.pri)
+diff --git a/src/qt_targets.pri b/src/qt_targets.pri
+index af1a32b..f9e3f74 100644
+--- a/src/qt_targets.pri
++++ b/src/qt_targets.pri
+@@ -2,3 +2,5 @@ QMAKE_TARGET_COMPANY = Nokia Corporation and/or its subsidiary(-ies)
+ QMAKE_TARGET_PRODUCT = Qt4
+ QMAKE_TARGET_DESCRIPTION = C++ application development framework.
+ QMAKE_TARGET_COPYRIGHT = Copyright (C) 2011 Nokia Corporation and/or its subsidiary(-ies).
++
++include(../devkit.pri)
+diff --git a/tools/linguist/shared/formats.pri b/tools/linguist/shared/formats.pri
+index 985f6db..520337b 100644
+--- a/tools/linguist/shared/formats.pri
++++ b/tools/linguist/shared/formats.pri
+@@ -20,3 +20,5 @@ SOURCES += \
+     $$PWD/po.cpp \
+     $$PWD/ts.cpp \
+     $$PWD/xliff.cpp 
++
++include(../../../devkit.pri)
+diff --git a/tools/porting/src/src.pro b/tools/porting/src/src.pro
+index d626b19..0daa46b 100644
+--- a/tools/porting/src/src.pro
++++ b/tools/porting/src/src.pro
+@@ -91,3 +91,5 @@ win32-msvc.net|win32-msvc2* {
+     QMAKE_CFLAGS   -= -Zm200 -Zm300
+     QMAKE_CFLAGS   += -Zm1000
+ }
++
++include(../../../devkit.pri)
+diff --git a/tools/qdbus/qdbus/qdbus.pro b/tools/qdbus/qdbus/qdbus.pro
+index ea732ef..234ed93 100644
+--- a/tools/qdbus/qdbus/qdbus.pro
++++ b/tools/qdbus/qdbus/qdbus.pro
+@@ -8,3 +8,5 @@ win32:CONFIG += console
+ 
+ target.path=$$[QT_INSTALL_BINS]
+ INSTALLS += target
++
++include(../../../devkit.pri)
+diff --git a/tools/qdbus/qdbuscpp2xml/qdbuscpp2xml.pro b/tools/qdbus/qdbuscpp2xml/qdbuscpp2xml.pro
+index 9ee1d37..9f87781 100644
+--- a/tools/qdbus/qdbuscpp2xml/qdbuscpp2xml.pro
++++ b/tools/qdbus/qdbuscpp2xml/qdbuscpp2xml.pro
+@@ -8,3 +8,5 @@ win32:CONFIG += console
+ 
+ target.path=$$[QT_INSTALL_BINS]
+ INSTALLS += target
++
++include(../../../devkit.pri)
+diff --git a/tools/qdbus/qdbusxml2cpp/qdbusxml2cpp.pro b/tools/qdbus/qdbusxml2cpp/qdbusxml2cpp.pro
+index 6f78c7c..f5fec79 100644
+--- a/tools/qdbus/qdbusxml2cpp/qdbusxml2cpp.pro
++++ b/tools/qdbus/qdbusxml2cpp/qdbusxml2cpp.pro
+@@ -8,3 +8,5 @@ win32:CONFIG += console
+ 
+ target.path=$$[QT_INSTALL_BINS]
+ INSTALLS += target
++
++include(../../../devkit.pri)
+diff --git a/tools/xmlpatterns/xmlpatterns.pro b/tools/xmlpatterns/xmlpatterns.pro
+index 8cd321c..6666d98 100644
+--- a/tools/xmlpatterns/xmlpatterns.pro
++++ b/tools/xmlpatterns/xmlpatterns.pro
+@@ -26,3 +26,4 @@ HEADERS = main.h                            \
+ 
+ symbian: TARGET.UID3 = 0xA000D7C9
+ 
++include (../../devkit.pri)
