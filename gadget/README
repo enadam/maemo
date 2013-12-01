@@ -14,3 +14,4 @@ xprootfs		extract a rootfs.tar.gz to be buildable later
 mkrootfs		create a flashable ubifs image from a directory tree
 flipstats.conf		make the X server log rendering statistics
 toys/			little toy programs for N900
+testprogs/		programs to test hildon-desktop
