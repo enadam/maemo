@@ -7,7 +7,7 @@
 getwins()
 {
 	appid=`map -v image-viewer | grep -o 0x...`;
-	for win in `map -Q | grep -B 1 '    Geometry: 800x[0-9]\++800+[0-9]\+$' | sed -ne 's/^ *Subwindow \('$appid'[0-9a-f]\+\):$/\1/p'`;
+	for win in `map -Qq | grep -B 4 '    Geometry: *800x[0-9]\++800+[0-9]\+$' | sed -ne 's/^ *Subwindow \('$appid'[0-9a-f]\+\):$/\1/p'`;
 	do
 		if xprop -id "$win" | grep -q "program specified minimum size: 0 by 0$";
 		then
@@ -71,7 +71,7 @@ while :; do map $line3 $win3; checkparent $win3; done & p3=$!;
 # This doesn't really work.
 trap "echo bye; kill $p1 $p2 $p3; exit 0;" INT;
 
-# While then engines are running check the animation actors periodically,
+# While the engines are running check the animation actors periodically,
 # and restart ourselves if they change.
 while sleep 15;
 do
